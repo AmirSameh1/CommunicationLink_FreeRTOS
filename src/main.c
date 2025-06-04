@@ -725,7 +725,7 @@ void main(int argc, char* argv[]) {
 
     //xTaskCreate(GeneratorTask, "GenTask", 256, (void*) node, 2, NULL);
     xTaskCreate(SenderTask, "Sender1", 256, (void*)&Sender1, 1, NULL);
-    //xTaskCreate(SenderTask, "Sender2", 256, (void*)&Sender2, 2, NULL);
+    xTaskCreate(SenderTask, "Sender2", 256, (void*)&Sender2, 1, NULL);
     xTaskCreate(SwitchTask, "Switch", 256, NULL, 1, NULL);
     xTaskCreate(ReceiverTask, "Receiver3", 256, (void*)&Reciever1, 1, NULL);
     xTaskCreate(ReceiverTask, "Receiver4", 256, (void*)&Reciever2, 1, NULL);
