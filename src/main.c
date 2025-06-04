@@ -77,7 +77,7 @@
 
 #define T1 					( (uint8_t) 100 )
 #define T2 					( (uint8_t) 200 )
-#define Tout 				( pdMS_TO_TICKS(150) )      // tp be replaced {150, 175, 200, 225} msec
+#define Tout 				( pdMS_TO_TICKS(225) )      // tp be replaced {150, 175, 200, 225} msec
 #define Pdrop 				( (double)0.01 )            // to be replaced {0.01, 0.02, 0.04, 0.08}
 #define P_ack 				( (double)0.01 )
 #define P_WRONG_PACKET		( (double)0.0 )
@@ -90,7 +90,7 @@ static const uint32_t	L1 = 500;
 static const uint32_t	L2 = 1500;
 static const uint8_t	K = 40;                         // ack backet size
 static const uint32_t	C = 100000;                     // link capacity (bits/sec)
-static const uint8_t	N = 1;                          // Buffer Queue size {1 , 2 , 4 , 8 , 16}
+static const uint8_t	N = 2;                          // Buffer Queue size {1 , 2 , 4 , 8 , 16}
 
 
 /** End of Macros *************************************************************/
@@ -103,7 +103,7 @@ QueueHandle_t Sender2_GenQueue;
 QueueHandle_t Sender2_BufferQueue;
 QueueHandle_t Sender2_AckQueue;
 
-QueueHandle_t SwitchQueue[4];
+QueueHandle_t SwitchQueue;
 
 
 QueueHandle_t Receiver3Queue;
@@ -123,10 +123,6 @@ SemaphoreHandle_t sender1_BlockSemaphore;
 SemaphoreHandle_t sender2_BlockSemaphore;
 
 
-uint8_t getRandom3or4() {
-    return (rand() % 2) ? 3 : 4;
-}
-
 int RandVal(int min, int max) {
     return rand() % (max - min + 1) + min;
 }
@@ -134,7 +130,7 @@ int RandVal(int min, int max) {
 typedef struct {
     uint8_t destination;
     uint8_t sender;
-    uint16_t sequence;
+    uint32_t sequence;
     uint16_t length;
 } Header_t;
 
@@ -152,7 +148,8 @@ QueueHandle_t ACKQueue;
 TimerHandle_t ToutTimer;
 TimerHandle_t SendTimer;
 SemaphoreHandle_t BlockSemaphore;
-uint32_t seq;
+uint32_t seq1;
+uint32_t seq2;
 uint8_t NodeNum;
 bool GenStarted;
 
@@ -167,25 +164,27 @@ static Node Reciever2;
 
 Packet_Manager(QueueHandle_t Queue , uint16_t length , uint32_t seq , uint8_t src ,uint8_t dest){
 
+
     Packet_t *packet = (Packet_t *)malloc(sizeof(Packet_t) + length - 8);
     if (!packet) {
         trace_printf("Sender%u: malloc failed",src);
         return;
     }
 
-    packet->header.destination = RandVal(3,4);
+    packet->header.destination = dest;
     packet->header.sender = src;
     packet->header.sequence = seq;
     packet->header.length = length;
     memset(packet->data, 0x0, length - 8);
     snprintf(packet->data, length - 8, "Hello from Sender1 #%u", packet->header.sequence);
 
-    if (xQueueSend(Queue, &packet, portMAX_DELAY) == pdPASS) {
-        trace_printf("Sender%u: sent packet #%u to %u (in generation queue)\n", packet->header.sender ,packet->header.sequence, packet->header.destination);
+    if (xQueueSend(Queue, &packet, portMAX_DELAY) == pdTRUE) {
+        trace_printf("Generator%u: generated packet #%u to %u\n", packet->header.sender ,packet->header.sequence, packet->header.destination);
     } else {
-        trace_puts("Sender%u: failed to send");
+        trace_printf("Generator%u: failed to generated", packet->header.sender);
         free(packet);
     }
+
 }
 
 
@@ -194,28 +193,38 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
 	 Node* node = (Node*) pvTimerGetTimerID(xTimer);
 
  if (xSemaphoreTake(xGenMutex, 0) == pdTRUE) {
+
      //trace_printf("node %d took semaphore \n" ,node->NodeNum);
      uint8_t dest = (uint8_t) RandVal(3,4);
      uint16_t length = (uint16_t) RandVal(L1, L2);
 
-     Packet_Manager(node->GenQueue,length,node->seq ,node->NodeNum ,dest);
-        node->seq++;
+     if(dest==3){
+        if(uxQueueSpacesAvailable(node->GenQueue) > 0){
+        Packet_Manager(node->GenQueue,length,node->seq1 ,node->NodeNum ,dest);
+        node->seq1++;
+     }}
+     else{
+        if(uxQueueSpacesAvailable(node->GenQueue) > 0){
+        Packet_Manager(node->GenQueue,length,node->seq2 ,node->NodeNum ,dest);
+        node->seq2++;
+     }
+    }
 
      //trace_printf("node %d gived semaphore \n" ,node->NodeNum);
      node->GenStarted =True;
      xSemaphoreGive(xGenMutex);
-
-    }
+     }
     else {
         trace_printf("node %d couldnt take semaphore \n" ,node->NodeNum);
     }
 
-
-
-    // Restart timer
+     // Restart timer
     int nextInterval = RandVal(T1, T2);
-    xTimerChangePeriod(xTimer, pdMS_TO_TICKS(nextInterval), 0);
+    xTimerChangePeriod(node->SendTimer, pdMS_TO_TICKS(nextInterval), 0);
+
 }
+
+
 
 static void Sender1ToutCallback(TimerHandle_t xTimer){
     // Node* node = (Node*) pvTimerGetTimerID(xTimer);
@@ -247,7 +256,7 @@ void SenderTask(void *pvParameters) {
     UBaseType_t ACKsRecived;
     uint8_t UnAckedPackets;
 
-    trace_printf("Node %d: task started\n" , node->NodeNum);
+    trace_printf("Node %d: task started role:sender\n" , node->NodeNum);
 
 
 
@@ -260,10 +269,10 @@ void SenderTask(void *pvParameters) {
          node->ToutTimer = xTimerCreate("Sender2ToutTimer", Tout, pdFALSE, (void*) node, Sender2ToutCallback);
     }
 
-
-     if (node->SendTimer != NULL) {
+ if (node->SendTimer != NULL) {
             xTimerStart(node->SendTimer, 0);
         }
+
 
 
     while(1){
@@ -337,9 +346,9 @@ void SenderTask(void *pvParameters) {
                         memcpy(packet_copies[j], temp_packets[j], sizeof(Packet_t));
 
                         // Send copy to switch
-                        if (xQueueSend(SwitchQueue[node->NodeNum-1], &packet_copies[j], 0) == pdTRUE) {
+                        if (xQueueSend(SwitchQueue, &packet_copies[j], 0) == pdTRUE) {
                             copies_created++;
-                            trace_printf("Sender%u: Sent copy of packet %d to switch  try: %u\n", node->NodeNum, packet_copies[j]->header.sequence,i);
+                            trace_printf("Sender%u: Sent copy of packet %d to switch  try: %u\n", node->NodeNum, packet_copies[j]->header.sequence,i+1);
                         } else {
                             // Switch queue full - free the copy and stop
                             free(packet_copies[j]);
@@ -373,7 +382,8 @@ void SenderTask(void *pvParameters) {
                 trace_printf("sender%u: started Tout counting! task blocked\n",node->NodeNum);
             if (xSemaphoreTake(node->BlockSemaphore, portMAX_DELAY) == pdTRUE){ // we wait for Tout to unblock the task
 
-                ACKsRecived = N-uxQueueSpacesAvailable(node->ACKQueue);
+                ACKsRecived = uxQueueMessagesWaiting(node->ACKQueue);
+                trace_printf("sender%u: acks recieved:%u \n", node->NodeNum ,ACKsRecived);
 
                 if(ACKsRecived ==0){
                      trace_printf("sender%u: no acks for me at all \n", node->NodeNum);
@@ -387,14 +397,15 @@ void SenderTask(void *pvParameters) {
 
                     if(xQueuePeek(node->BufferQueue, &pkt_buff, 0) == pdTRUE){
 
-                        if(pkt_ack->header.sequence == pkt_buff->header.sequence){
+                        if(pkt_ack->header.sequence == pkt_buff->header.sequence  && pkt_ack->header.destination == pkt_buff->header.sender){
 
-                             if(xQueueReceive(node->BufferQueue, &pkt_buff, 0)==pdTRUE){
-                                trace_printf("sender%u: recieved ack and freed from buffer queue\n", node->NodeNum);
+                             if(xQueueReceive(node->BufferQueue, &pkt_buff, 0) == pdTRUE){
+                                uint8_t frees = uxQueueMessagesWaiting(node->BufferQueue);
+                                trace_printf("sender%u: recieved ack and freed from buffer queue (%u packets left at buffer)\n", node->NodeNum,frees);
                                  //   UnAckedPackets--;// not needed
                                 free(pkt_buff);
                                 free(pkt_ack);
-                             }
+                            }
 
                         }
                         else{
@@ -413,7 +424,8 @@ void SenderTask(void *pvParameters) {
 
             }
 
-                bufferFree = uxQueueSpacesAvailable(node->BufferQueue);
+                trace_printf("sender%u:_______my generator still has %u packets left__________\n", node->NodeNum,uxQueueMessagesWaiting(node->GenQueue));
+            bufferFree = uxQueueSpacesAvailable(node->BufferQueue);
 
             }
 
@@ -421,14 +433,13 @@ void SenderTask(void *pvParameters) {
 
         }
 
-
         if(node->GenStarted){
 
                 for (int j = 0; j < N; j++){
                     Packet_t* pkt_buff;
-                    if(xQueueReceive(node->BufferQueue, &pkt_buff, 0)==pdTRUE){
+                if(xQueueReceive(node->BufferQueue, &pkt_buff, 0)==pdTRUE){
                 if(bufferFree >= N){
-                    trace_printf("sender%u:all packets sent successfully, now freeing them\n", node->NodeNum);
+                    trace_printf("sender%u:all packets sent successfully and were acked, now freeing them\n", node->NodeNum);
                 }
                 else{
                     trace_printf("sender%u:not all packets were successfully sent, now freeing them\n", node->NodeNum);
@@ -436,66 +447,82 @@ void SenderTask(void *pvParameters) {
 
                                         free(pkt_buff);
                                         trace_printf("sender%u: POP!\n", node->NodeNum);
-                    }
-                 }
+                }
+                }
 
         }
 
 
 
 
+
     }
 
 }
 
-
-
-
-
-
-
-void packetHandler(TimerHandle_t xTimer) {
-    Packet_t* pkt = (Packet_t*) pvTimerGetTimerID(xTimer);
-
-    if (pkt == NULL) return;
+QueueHandle_t DestTable(Packet_t* pkt) {
 
     switch (pkt->header.destination) {  // fun fact :  we used a switch in a switch  ≧◡≦
         case 1:
-            if(xQueueSend(Sender1_AckQueue, &pkt, 0)!=pdTRUE){
-                trace_printf("switch: Failed to send packet to Sender1_AckQueue\n");
-            }else{
-                trace_printf("switch: packet sent to 1\n");
-            }
+            return Sender1_AckQueue;
             break;
         case 2:
-            if(xQueueSend(Sender2_AckQueue, &pkt, 0)!=pdTRUE){
-                trace_printf("switch: Failed to send packet to Sender2_AckQueue\n");
-            }else{
-                trace_printf("switch: packet sent to 2\n");
-            }
+            return Sender2_AckQueue;
             break;
         case 3:
-            if(xQueueSend(Receiver3Queue, &pkt, 0)!=pdTRUE){
-                trace_printf("switch: Failed to send packet to Receiver3Queue\n");
-            }else{
-                trace_printf("switch: packet sent to 3\n");
-            }
+            return Receiver3Queue;
             break;
         case 4:
-            if(xQueueSend(Receiver4Queue, &pkt, 0)!=pdTRUE){
-                trace_printf("switch: Failed to send packet to Receiver4Queue\n");
-            }else{
-                trace_printf("switch: packet sent to 4\n");
-            }
+            return Receiver4Queue;
             break;
         default:
             trace_printf("Unknown destination: %u\n", pkt->header.destination);
             break;
+            return NULL;
+    }
+}
+
+
+void ForwardPort1(TimerHandle_t xTimer){
+
+	Packet_t* pkt = (Packet_t*) pvTimerGetTimerID(xTimer);
+
+    if(pkt->header.length ==40){
+
+        if(RandVal(0,100) >= P_ack*100){
+            if(xQueueSend(DestTable(pkt),&pkt,0)== pdTRUE){
+	    	    trace_printf("Switch: send ack from %u to %u\n", pkt->header.sender, pkt->header.destination);
+	        }
+            else{
+                trace_printf("Switch: faild to send ack from %u to %u\n", pkt->header.sender, pkt->header.destination);
+            }
+        }
+        else{
+            trace_printf("Switch: dropped ack from %u to %u\n", pkt->header.sender, pkt->header.destination);
+        }
+
+
+    }
+    else{
+
+    if(RandVal(0,100) >= Pdrop*100){
+         if(xQueueSend(DestTable(pkt),&pkt,0)== pdTRUE){
+	    	trace_printf("Switch: send packet from %u to %u\n", pkt->header.sender, pkt->header.destination);
+	    }
+        else{
+                trace_printf("Switch: faild to send packet from %u to %u\n", pkt->header.sender, pkt->header.destination);
+            }
+    }
+    else{
+        trace_printf("Switch: dropped packet from %u to %u\n", pkt->header.sender, pkt->header.destination);
     }
 
-    free(pkt);
-    xTimerDelete(xTimer, 0);  // Clean up the timer
+    }
+
+         xTimerDelete(xTimer, 0);
 }
+
+
 
 void SwitchTask(void *parameters) {
 
@@ -504,43 +531,33 @@ void SwitchTask(void *parameters) {
     //QueueSetMemberHandle_t activeQueue;
     Packet_t *pkt;
 
+    TimerHandle_t delayTimerd;
+
+    // delayTimerd[0] = xTimerCreate("timer1",pdMS_TO_TICKS(10),pdFALSE,(void*) pkt[0],ForwardPort1);
+    // delayTimerd[1] = xTimerCreate("timer2",pdMS_TO_TICKS(10),pdFALSE,(void*) pkt[1],ForwardPort2);
+    // delayTimerd[2] = xTimerCreate("timer3",pdMS_TO_TICKS(10),pdFALSE,(void*) pkt[2],ForwardPort3);
+    // delayTimerd[3] = xTimerCreate("timer4",pdMS_TO_TICKS(10),pdFALSE,(void*) pkt[3],ForwardPort4);
+
+
     while (1) {
 
-        //activeQueue = xQueueSelectFromSet(xSwitchQueueSet, portMAX_DELAY);
+    	if (xQueueReceive(SwitchQueue, &pkt, 0) == pdTRUE){
+    		     trace_printf("Switch: received packet from %u to %u\n", pkt->header.sender, pkt->header.destination);
+    		     delayTimerd = xTimerCreate("timer1",pdMS_TO_TICKS(10),pdFALSE,(void*) pkt,ForwardPort1);
+                 xTimerChangePeriod(delayTimerd, D +pdMS_TO_TICKS(((pkt->header.length * 8.0) / C) * 1000), 0);
+                 xTimerStart(delayTimerd,0);
+    		}
 
-        for (int i = 0; i < NUM_INPUT_QUEUES; i++){  // for sorry we use polling as queue sets are not defined  "undefined reference error"
-
-            if (uxQueueMessagesWaiting(SwitchQueue[i]) > 0){
-
-                if (xQueueReceive(SwitchQueue[i], &pkt, 0) == pdTRUE){
-                    trace_printf("Switch: received packet from %u to %u\n", pkt->header.sender, pkt->header.destination);
-
-                     TimerHandle_t delayTimer = xTimerCreate("packetHandler",pdMS_TO_TICKS(100),pdFALSE,(void*) pkt,packetHandler);
-
-                      if (delayTimer != NULL) {
-                     xTimerStart(delayTimer, 0);
-                     } else {
-                       trace_printf("Failed to create timer for packet\n");
-                    }
-                }
-
-            }
-
-          //  vTaskDelay(pdMS_TO_TICKS(50));  //  to allow lower priority tasks to breath
-
-        }
-
+    	vTaskDelay(pdMS_TO_TICKS(10));
     }
-
-
-    }
+}
 
 
 
 void ReceiverTask(void* pvParameters) {
 
     Node* node = (Node*) pvParameters;
-    trace_printf("Node %d: task started \n" , node->NodeNum);
+    trace_printf("Node %d: task started role:reciever \n" , node->NodeNum);
 
     Packet_t * pkt;
     Packet_t * ack_pkt;
@@ -577,7 +594,7 @@ void ReceiverTask(void* pvParameters) {
             snprintf(ack_pkt->data, ack_pkt->header.length - 8, "ACK #%u", ack_pkt->header.sequence);
 
             free(pkt);
-            if (xQueueSend(SwitchQueue[node->NodeNum-1], &ack_pkt, 0) == pdTRUE){
+            if (xQueueSend(SwitchQueue, &ack_pkt, 0) == pdTRUE){
 
                  trace_printf("Receiver%u: sent ack to  %u replay Seq #%u\n", node->NodeNum,  ack_pkt->header.destination , ack_pkt->header.sequence);
             }
@@ -608,21 +625,21 @@ void ReceiverTask(void* pvParameters) {
 
 
 void main(int argc, char* argv[]) {
+
+	trace_printf("starting simulation with parameters P_drop:%u  , Tout:%u ", Pdrop,Tout);
+
     // Queues
-    Sender1_GenQueue = xQueueCreate(10, sizeof(Packet_t*));
+    Sender1_GenQueue = xQueueCreate(N*5, sizeof(Packet_t*));
     Sender1_BufferQueue = xQueueCreate(N, sizeof(Packet_t*));
-    Sender1_AckQueue = xQueueCreate(N, sizeof(Packet_t*));
+    Sender1_AckQueue = xQueueCreate(N*3, sizeof(Packet_t*));
 
-    Sender2_GenQueue = xQueueCreate(10, sizeof(Packet_t*));
+    Sender2_GenQueue = xQueueCreate(N*5, sizeof(Packet_t*));
     Sender2_BufferQueue = xQueueCreate(N, sizeof(Packet_t*));
-    Sender2_AckQueue = xQueueCreate(N, sizeof(Packet_t*));
+    Sender2_AckQueue = xQueueCreate(N*3, sizeof(Packet_t*));
 
-    SwitchQueue[0] = xQueueCreate(10, sizeof(Packet_t*));
-    SwitchQueue[1] = xQueueCreate(10, sizeof(Packet_t*));
-    SwitchQueue[2] = xQueueCreate(10, sizeof(Packet_t*));
-    SwitchQueue[3] = xQueueCreate(10, sizeof(Packet_t*));
-    Receiver3Queue = xQueueCreate(10, sizeof(Packet_t*));
-    Receiver4Queue = xQueueCreate(10, sizeof(Packet_t*));
+    SwitchQueue = xQueueCreate(N*10, sizeof(Packet_t*));
+    Receiver3Queue = xQueueCreate(N*3, sizeof(Packet_t*));
+    Receiver4Queue = xQueueCreate(N*3, sizeof(Packet_t*));
 
    // xSwitchQueueSet = xQueueCreateSet(10 * NUM_INPUT_QUEUES); // again  very very very special
 
@@ -647,10 +664,7 @@ void main(int argc, char* argv[]) {
         Sender2_GenQueue != NULL &&
         Sender2_BufferQueue != NULL &&
         Sender2_AckQueue != NULL &&
-        SwitchQueue[0] != NULL &&
-        SwitchQueue[1] != NULL &&
-        SwitchQueue[2] != NULL &&
-        SwitchQueue[3] != NULL &&
+        SwitchQueue != NULL &&
         Receiver3Queue != NULL &&
         Receiver4Queue != NULL)
     {
@@ -670,7 +684,8 @@ void main(int argc, char* argv[]) {
     Sender1.SendTimer = NULL;
     Sender1.NodeNum = 1;
     Sender1.BlockSemaphore =sender1_BlockSemaphore;
-    Sender1.seq = 0;
+    Sender1.seq1 = 0;
+    Sender1.seq2 = 0;
     Sender1.GenStarted =False;
 
     Sender2.GenQueue = Sender2_GenQueue;
@@ -680,7 +695,8 @@ void main(int argc, char* argv[]) {
     Sender2.SendTimer = NULL;
     Sender2.NodeNum = 2;
     Sender2.BlockSemaphore =sender2_BlockSemaphore;
-    Sender2.seq = 0;
+    Sender2.seq1 = 0;
+    Sender2.seq2 = 0;
     Sender2.GenStarted =False;
 
 
@@ -691,7 +707,8 @@ void main(int argc, char* argv[]) {
     Reciever1.SendTimer = NULL;
     Reciever1.NodeNum = 3;
     Reciever1.BlockSemaphore =NULL;
-    Reciever1.seq = NULL;
+    Reciever1.seq1 = NULL;
+    Reciever1.seq2 = NULL;
     Reciever1.GenStarted =NULL;
 
     Reciever2.BufferQueue = Receiver4Queue;
@@ -701,11 +718,14 @@ void main(int argc, char* argv[]) {
     Reciever2.SendTimer = NULL;
     Reciever2.NodeNum = 4;
     Reciever2.BlockSemaphore =NULL;
-    Reciever2.seq = NULL;
+    Reciever2.seq1 = NULL;
+    Reciever2.seq2 = NULL;
     Reciever2.GenStarted =NULL;
 
+
+    //xTaskCreate(GeneratorTask, "GenTask", 256, (void*) node, 2, NULL);
     xTaskCreate(SenderTask, "Sender1", 256, (void*)&Sender1, 1, NULL);
-    xTaskCreate(SenderTask, "Sender2", 256, (void*)&Sender2, 1, NULL);
+    //xTaskCreate(SenderTask, "Sender2", 256, (void*)&Sender2, 2, NULL);
     xTaskCreate(SwitchTask, "Switch", 256, NULL, 1, NULL);
     xTaskCreate(ReceiverTask, "Receiver3", 256, (void*)&Reciever1, 1, NULL);
     xTaskCreate(ReceiverTask, "Receiver4", 256, (void*)&Reciever2, 1, NULL);
